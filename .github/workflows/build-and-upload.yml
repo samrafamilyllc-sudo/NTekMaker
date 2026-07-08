@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
     
     steps:
       - name: Checkout code
@@ -17,29 +17,30 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
       
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm install
       
       - name: Build Vite app
         run: npm run build
       
-      - name: Setup Capacitor
-        run: |
-          npm install @capacitor/core @capacitor/cli
-          npx cap add ios
+      - name: Install Capacitor CLI
+        run: npm install @capacitor/core @capacitor/cli
+      
+      - name: Add iOS platform
+        run: npx cap add ios
       
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.0'
+          ruby-version: '3.3'
           bundler-cache: true
       
       - name: Install fastlane
         run: gem install fastlane
       
-      - name: Build and sign iOS app
+      - name: Build and upload to App Store Connect
         env:
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
@@ -48,12 +49,3 @@ jobs:
         run: |
           cd ios/App
           fastlane build_and_upload
-      
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            ios/App/build/
-            fastlane/report.xml
