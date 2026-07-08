@@ -1,226 +1,59 @@
-name: Build & Upload iOS App
-
-# Push to main (or tap "Run workflow" in the Actions tab) and this pipeline
-# builds the web app, wraps it with Capacitor, then uses fastlane to sign,
-# build, and upload the .ipa to App Store Connect / TestFlight using the
-# App Store Connect API key — no local Xcode or Mac required.
+name: Build and Upload to App Store Connect
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch: {}
-
-concurrency:
-  group: ios-build-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  APP_NAME: NTekMaker
-  BUNDLE_ID: com.ntekmaker.app
-  SCHEME: App
-  WORKSPACE: App.xcworkspace
-  IOS_APP_DIR: apps/web/ios/App
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
-  build-and-upload:
-    name: Build & Upload to App Store Connect
-    runs-on: macos-14
-    timeout-minutes: 60
-
-    env:
-      APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
-      APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_KEY_P8: ${{ secrets.APPLE_KEY_P8 }}
-
+  build:
+    runs-on: macos-latest
+    
     steps:
-      # ------------------------------------------------------------------
-      # 1. Preconditions
-      # ------------------------------------------------------------------
-      - name: Verify required secrets
-        run: |
-          missing=0
-          for name in APPLE_KEY_ID APPLE_ISSUER_ID APPLE_TEAM_ID APPLE_KEY_P8; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing required secret: $name — add it under Settings → Secrets and variables → Actions."
-              missing=1
-            fi
-          done
-          [ "$missing" = "0" ] && echo "✅ All required Apple secrets are present." || exit 1
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Select latest stable Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
-
-      - name: Set up Ruby + fastlane
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build Vite app
+        run: npm run build
+      
+      - name: Setup Capacitor
+        run: |
+          npm install @capacitor/core @capacitor/cli
+          npx cap add ios
+      
+      - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.2"
-
+          ruby-version: '3.0'
+          bundler-cache: true
+      
       - name: Install fastlane
-        run: gem install fastlane --no-document
-
-      # ------------------------------------------------------------------
-      # 2. Build the web app + Capacitor iOS project
-      # ------------------------------------------------------------------
-      - name: Install web dependencies
-        working-directory: apps/web
-        run: npm ci || npm install
-
-      - name: Build web assets (Vite)
-        working-directory: apps/web
-        run: npm run build
-
-      - name: Ensure Capacitor CLI + iOS platform
-        working-directory: apps/web
-        run: |
-          if ! npm ls @capacitor/core >/dev/null 2>&1; then
-            echo "Installing Capacitor packages..."
-            npm install @capacitor/core @capacitor/ios @capacitor/splash-screen
-            npm install -D @capacitor/cli
-          fi
-
-          if [ ! -f capacitor.config.json ] && [ ! -f capacitor.config.ts ]; then
-            echo "Initializing Capacitor project..."
-            npx cap init "$APP_NAME" "$BUNDLE_ID" --web-dir=dist
-          fi
-
-          if [ ! -d ios ]; then
-            echo "Adding iOS platform..."
-            npx cap add ios
-          fi
-
-      - name: Sync web build into the iOS project
-        working-directory: apps/web
-        run: npx cap sync ios
-
-      - name: Install CocoaPods dependencies
-        working-directory: apps/web/ios/App
-        run: |
-          if [ -f Podfile ]; then
-            pod install --repo-update
-          else
-            echo "No Podfile found — skipping pod install."
-          fi
-
-      # ------------------------------------------------------------------
-      # 3. Write the App Store Connect API key + fastlane config
-      # ------------------------------------------------------------------
-      - name: Write App Store Connect API key
-        run: |
-          mkdir -p ~/private_keys
-          echo "$APPLE_KEY_P8" > ~/private_keys/AuthKey_${APPLE_KEY_ID}.p8
-          chmod 600 ~/private_keys/AuthKey_${APPLE_KEY_ID}.p8
-          echo "✅ API key written."
-
-      - name: Generate Fastfile
-        run: |
-          mkdir -p "$IOS_APP_DIR/fastlane"
-          cat > "$IOS_APP_DIR/fastlane/Fastfile" <<'RUBY'
-          default_platform(:ios)
-
-          platform :ios do
-            desc "Build and upload to App Store Connect"
-            lane :release do
-              api_key = app_store_connect_api_key(
-                key_id: ENV["APPLE_KEY_ID"],
-                issuer_id: ENV["APPLE_ISSUER_ID"],
-                key_filepath: File.expand_path("~/private_keys/AuthKey_#{ENV['APPLE_KEY_ID']}.p8"),
-                in_house: false
-              )
-
-              increment_build_number(
-                xcodeproj: "App.xcodeproj",
-                build_number: Time.now.strftime("%Y%m%d%H%M")
-              )
-
-              build_app(
-                workspace: ENV["WORKSPACE"],
-                scheme: ENV["SCHEME"],
-                configuration: "Release",
-                export_method: "app-store",
-                clean: true,
-                output_directory: "build",
-                output_name: "#{ENV['APP_NAME']}.ipa",
-                xcargs: "-allowProvisioningUpdates DEVELOPMENT_TEAM=#{ENV['APPLE_TEAM_ID']}",
-                export_options: {
-                  method: "app-store",
-                  teamID: ENV["APPLE_TEAM_ID"],
-                  signingStyle: "automatic",
-                  uploadSymbols: true
-                }
-              )
-
-              upload_to_app_store(
-                api_key: api_key,
-                skip_screenshots: true,
-                skip_metadata: true,
-                precheck_include_in_app_purchases: false,
-                submit_for_review: false,
-                run_precheck_before_submit: false,
-                force: true
-              )
-            end
-          end
-          RUBY
-          echo "✅ Fastfile generated."
-
-      - name: Set automatic signing team
-        working-directory: apps/web/ios/App
-        run: |
-          /usr/libexec/PlistBuddy -c "Print" App.xcodeproj/project.pbxproj >/dev/null 2>&1 || true
-          echo "Using DEVELOPMENT_TEAM=$APPLE_TEAM_ID with automatic signing (managed by fastlane/xcodebuild)."
-
-      # ------------------------------------------------------------------
-      # 4. Build + upload via fastlane
-      # ------------------------------------------------------------------
-      - name: Build & upload to App Store Connect (fastlane)
-        working-directory: apps/web/ios/App
-        run: fastlane release
+        run: gem install fastlane
+      
+      - name: Build and sign iOS app
         env:
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: "120"
-          FASTLANE_XCODEBUILD_SETTINGS_RETRIES: "5"
-
-      # ------------------------------------------------------------------
-      # 5. Diagnostics
-      # ------------------------------------------------------------------
-      - name: Upload build artifacts for debugging (always)
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_KEY_P8: ${{ secrets.APPLE_KEY_P8 }}
+        run: |
+          cd ios/App
+          fastlane build_and_upload
+      
+      - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
-          name: ios-build-output
+          name: build-logs
           path: |
-            apps/web/ios/App/build/**
-            ~/Library/Logs/gym/**
-          retention-days: 7
-          if-no-files-found: ignore
-
-      - name: Build summary
-        if: success()
-        run: |
-          {
-            echo "### ✅ $APP_NAME iOS build uploaded"
-            echo ""
-            echo "The new build was sent to App Store Connect. Open TestFlight or"
-            echo "App Store Connect in a few minutes to watch it finish processing."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Failure hint
-        if: failure()
-        run: |
-          {
-            echo "### ❌ Build failed"
-            echo ""
-            echo "Check the **Build & upload to App Store Connect (fastlane)** step log above."
-            echo "Common causes: expired API key, wrong Bundle ID (\`$BUNDLE_ID\`),"
-            echo "or the app record not yet created in App Store Connect."
-          } >> "$GITHUB_STEP_SUMMARY"
+            ios/App/build/
+            fastlane/report.xml
